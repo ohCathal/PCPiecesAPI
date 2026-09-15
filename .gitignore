@@ -1,0 +1,5 @@
+node_modules
+.env
+bench.db
+bench.db-shm
+bench.db-wal
