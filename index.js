@@ -1,12 +1,22 @@
 import express from "express";
 import cors from "cors";
 import { getAllPartsGrouped, addPart, deletePart } from "./db.js";
-import { registerUser, loginUser, getUsernameForToken, logoutToken, saveUserData, getUserData } from "./auth.js";
-const API_KEY = process.env.ANTHROPIC_API_KEY;
+import {
+  registerAccount,
+  loginAccount,
+  getEmailForToken,
+  logoutToken,
+  saveAccountData,
+  getAccountData,
+  verifyEmailToken,
+  resendVerification,
+} from "./auth.js";
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+const API_KEY = process.env.ANTHROPIC_API_KEY;
 
 app.get("/api/parts", (req, res) => {
   try { res.json(getAllPartsGrouped()); }
@@ -27,48 +37,74 @@ app.delete("/api/parts/:id", (req, res) => {
 });
 
 /* ---------------------------------------------------------
-   AUTH
-   Every profile-related route below either issues a session
-   token (register/login) or requires one (everything else),
-   read from the standard "Authorization: Bearer <token>" header.
+   AUTH (email + password + real verification email)
 --------------------------------------------------------- */
 function requireAuth(req, res, next) {
   const authHeader = req.headers.authorization || "";
   const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
   if (!token) return res.status(401).json({ error: "Not signed in." });
-  const username = getUsernameForToken(token);
-  if (!username) return res.status(401).json({ error: "Session expired, please sign in again." });
-  req.username = username;
+  const email = getEmailForToken(token);
+  if (!email) return res.status(401).json({ error: "Session expired, please sign in again." });
+  req.email = email;
   req.token = token;
   next();
 }
 
 app.post("/api/auth/register", async (req, res) => {
-  const { username, pin } = req.body || {};
-  if (!username || !username.trim() || !pin || pin.length < 4) {
-    return res.status(400).json({ error: "Username and a PIN of at least 4 digits are required." });
-  }
+  const { email, password } = req.body || {};
+  if (!email || !password) return res.status(400).json({ error: "Email and password are required." });
   try {
-    const token = await registerUser(username.trim(), pin);
-    res.status(201).json({ token, username: username.trim() });
+    await registerAccount(email.trim().toLowerCase(), password);
+    res.status(201).json({ message: "Check your email for a link to verify your account." });
   } catch (err) {
-    res.status(409).json({ error: err.message });
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+app.post("/api/auth/resend-verification", async (req, res) => {
+  const { email } = req.body || {};
+  if (!email) return res.status(400).json({ error: "Email is required." });
+  try {
+    await resendVerification(email.trim().toLowerCase());
+    res.json({ message: "Verification email sent again." });
+  } catch (err) {
+    res.status(err.status || 400).json({ error: err.message });
+  }
+});
+
+// This is the link the person actually clicks in their inbox -- a plain
+// GET request, no frontend involved, since it just needs to mark the
+// account verified and show a simple confirmation.
+app.get("/api/auth/verify", (req, res) => {
+  const { token } = req.query;
+  const email = token ? verifyEmailToken(token) : null;
+  res.set("Content-Type", "text/html");
+  if (email) {
+    res.send(`<html><body style="font-family:sans-serif; text-align:center; padding:60px;">
+      <h2>Email verified 🎉</h2>
+      <p>${email} is now verified. You can close this tab and sign in.</p>
+    </body></html>`);
+  } else {
+    res.status(400).send(`<html><body style="font-family:sans-serif; text-align:center; padding:60px;">
+      <h2>Link expired or invalid</h2>
+      <p>Request a new verification email and try again.</p>
+    </body></html>`);
   }
 });
 
 app.post("/api/auth/login", async (req, res) => {
-  const { username, pin } = req.body || {};
-  if (!username || !pin) return res.status(400).json({ error: "Username and PIN are required." });
+  const { email, password } = req.body || {};
+  if (!email || !password) return res.status(400).json({ error: "Email and password are required." });
   try {
-    const token = await loginUser(username.trim(), pin);
-    res.json({ token, username: username.trim() });
+    const token = await loginAccount(email.trim().toLowerCase(), password);
+    res.json({ token, email: email.trim().toLowerCase() });
   } catch (err) {
-    res.status(401).json({ error: err.message });
+    res.status(err.status || 401).json({ error: err.message });
   }
 });
 
 app.get("/api/auth/me", requireAuth, (req, res) => {
-  res.json({ username: req.username });
+  res.json({ email: req.email });
 });
 
 app.post("/api/auth/logout", requireAuth, (req, res) => {
@@ -77,14 +113,18 @@ app.post("/api/auth/logout", requireAuth, (req, res) => {
 });
 
 app.get("/api/profile", requireAuth, (req, res) => {
-  res.json(getUserData(req.username) || { build: {}, currentPC: {} });
+  res.json(getAccountData(req.email) || { build: {}, currentPC: {} });
 });
 
 app.post("/api/profile", requireAuth, (req, res) => {
   const { build, currentPC } = req.body || {};
-  saveUserData(req.username, build, currentPC);
+  saveAccountData(req.email, build, currentPC);
   res.json({ ok: true });
 });
+
+/* ---------------------------------------------------------
+   AI RECOMMENDATIONS
+--------------------------------------------------------- */
 app.post("/api/recommend", async (req, res) => {
   if (!API_KEY) {
     return res.status(500).json({ error: "ANTHROPIC_API_KEY is not set. Add it to a .env file." });
