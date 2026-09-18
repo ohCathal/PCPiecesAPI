@@ -95,6 +95,7 @@ export async function registerAccount(email, password) {
   try {
     await issueVerificationToken(email);
   } catch (err) {
+    console.error("Verification email failed to send:", err.message);
     // Roll back so a failed email doesn't leave behind an account that
     // can never be verified -- they can just register again cleanly.
     db.prepare("DELETE FROM accounts WHERE email = ?").run(email);
