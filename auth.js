@@ -1,7 +1,7 @@
 import crypto from "crypto";
 import bcrypt from "bcryptjs";
 import db from "./db.js";
-import { sendVerificationEmail } from "./mail.js";
+import { sendVerificationEmail, sendEmailChangeConfirmation } from "./mail.js";
 
 /* ---------------------------------------------------------
    REAL AUTHENTICATION (email + password + verification)
@@ -42,6 +42,15 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS auth_sessions (
     token TEXT PRIMARY KEY,
     email TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  )
+`);
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS email_change_tokens (
+    token TEXT PRIMARY KEY,
+    old_email TEXT NOT NULL,
+    new_email TEXT NOT NULL,
     created_at INTEGER NOT NULL
   )
 `);
@@ -176,4 +185,100 @@ export function getAccountData(email) {
   const account = db.prepare("SELECT build_json, current_pc_json FROM accounts WHERE email = ?").get(email);
   if (!account) return null;
   return { build: JSON.parse(account.build_json), currentPC: JSON.parse(account.current_pc_json) };
+}
+
+/* ---------------------------------------------------------
+   ACCOUNT MANAGEMENT (change password, change email, delete)
+   Every one of these requires the current password, even though
+   the request already came in with a valid session token -- a
+   stolen token alone shouldn't be enough to take over an account.
+--------------------------------------------------------- */
+
+export async function changePassword(email, currentPassword, newPassword) {
+  const account = db.prepare("SELECT * FROM accounts WHERE email = ?").get(email);
+  if (!account) {
+    const err = new Error("Account not found.");
+    err.status = 404;
+    throw err;
+  }
+  const valid = await bcrypt.compare(currentPassword, account.password_hash);
+  if (!valid) {
+    const err = new Error("Current password is incorrect.");
+    err.status = 401;
+    throw err;
+  }
+  if (!newPassword || newPassword.length < 8) {
+    const err = new Error("New password needs at least 8 characters.");
+    err.status = 400;
+    throw err;
+  }
+  const newHash = await bcrypt.hash(newPassword, SALT_ROUNDS);
+  db.prepare("UPDATE accounts SET password_hash = ? WHERE email = ?").run(newHash, email);
+}
+
+export async function requestEmailChange(currentEmail, newEmail, password) {
+  if (!EMAIL_RE.test(newEmail)) {
+    const err = new Error("Enter a valid email address.");
+    err.status = 400;
+    throw err;
+  }
+  const account = db.prepare("SELECT * FROM accounts WHERE email = ?").get(currentEmail);
+  if (!account) {
+    const err = new Error("Account not found.");
+    err.status = 404;
+    throw err;
+  }
+  const valid = await bcrypt.compare(password, account.password_hash);
+  if (!valid) {
+    const err = new Error("Password is incorrect.");
+    err.status = 401;
+    throw err;
+  }
+  const existing = db.prepare("SELECT email FROM accounts WHERE email = ?").get(newEmail);
+  if (existing) {
+    const err = new Error("That email is already in use.");
+    err.status = 409;
+    throw err;
+  }
+
+  const token = crypto.randomBytes(24).toString("hex");
+  db.prepare("INSERT INTO email_change_tokens (token, old_email, new_email, created_at) VALUES (?, ?, ?, ?)").run(
+    token,
+    currentEmail,
+    newEmail,
+    Date.now()
+  );
+  await sendEmailChangeConfirmation(newEmail, token);
+}
+
+export function confirmEmailChange(token) {
+  const row = db.prepare("SELECT * FROM email_change_tokens WHERE token = ?").get(token);
+  if (!row) return null;
+  db.prepare("DELETE FROM email_change_tokens WHERE token = ?").run(token);
+  if (Date.now() - row.created_at > VERIFY_TOKEN_TTL_MS) return null;
+
+  db.prepare("UPDATE accounts SET email = ? WHERE email = ?").run(row.new_email, row.old_email);
+  // Force re-login everywhere: a session tied to the old email shouldn't
+  // silently keep working under the new one.
+  db.prepare("DELETE FROM auth_sessions WHERE email = ?").run(row.old_email);
+  return row.new_email;
+}
+
+export async function deleteAccount(email, password) {
+  const account = db.prepare("SELECT * FROM accounts WHERE email = ?").get(email);
+  if (!account) {
+    const err = new Error("Account not found.");
+    err.status = 404;
+    throw err;
+  }
+  const valid = await bcrypt.compare(password, account.password_hash);
+  if (!valid) {
+    const err = new Error("Password is incorrect.");
+    err.status = 401;
+    throw err;
+  }
+  db.prepare("DELETE FROM accounts WHERE email = ?").run(email);
+  db.prepare("DELETE FROM auth_sessions WHERE email = ?").run(email);
+  db.prepare("DELETE FROM email_verification_tokens WHERE email = ?").run(email);
+  db.prepare("DELETE FROM email_change_tokens WHERE old_email = ?").run(email);
 }

@@ -48,3 +48,26 @@ export async function sendVerificationEmail(email, token) {
   });
   if (error) throw new Error(`Failed to send verification email: ${error.message || error}`);
 }
+
+export async function sendEmailChangeConfirmation(newEmail, token) {
+  const resend = getClient();
+  const confirmUrl = `${API_BASE_URL}/api/auth/confirm-email-change?token=${token}`;
+  const { error } = await resend.emails.send({
+    from: FROM_ADDRESS,
+    to: newEmail,
+    subject: "Confirm your new email for Bench",
+    html: `
+      <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
+        <h2>Confirm your new email</h2>
+        <p>Click the button below to confirm this is your new email address for your Bench account.</p>
+        <p>
+          <a href="${confirmUrl}" style="display:inline-block; background:#e22f3a; color:#fff; padding:10px 18px; text-decoration:none; border-radius:4px;">
+            Confirm new email
+          </a>
+        </p>
+        <p style="color:#888; font-size:12px;">If you didn't request this change, you can safely ignore this email.</p>
+      </div>
+    `,
+  });
+  if (error) throw new Error(`Failed to send confirmation email: ${error.message || error}`);
+}

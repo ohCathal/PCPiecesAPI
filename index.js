@@ -10,6 +10,10 @@ import {
   getAccountData,
   verifyEmailToken,
   resendVerification,
+  changePassword,
+  requestEmailChange,
+  confirmEmailChange,
+  deleteAccount,
 } from "./auth.js";
 
 const app = express();
@@ -120,6 +124,59 @@ app.post("/api/profile", requireAuth, (req, res) => {
   const { build, currentPC } = req.body || {};
   saveAccountData(req.email, build, currentPC);
   res.json({ ok: true });
+});
+
+/* ---------------------------------------------------------
+   ACCOUNT MANAGEMENT
+--------------------------------------------------------- */
+app.post("/api/auth/change-password", requireAuth, async (req, res) => {
+  const { currentPassword, newPassword } = req.body || {};
+  if (!currentPassword || !newPassword) return res.status(400).json({ error: "Current and new password are required." });
+  try {
+    await changePassword(req.email, currentPassword, newPassword);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+app.post("/api/auth/request-email-change", requireAuth, async (req, res) => {
+  const { newEmail, password } = req.body || {};
+  if (!newEmail || !password) return res.status(400).json({ error: "New email and password are required." });
+  try {
+    await requestEmailChange(req.email, newEmail.trim().toLowerCase(), password);
+    res.json({ message: "Check your new email inbox to confirm the change." });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+app.get("/api/auth/confirm-email-change", (req, res) => {
+  const { token } = req.query;
+  const newEmail = token ? confirmEmailChange(token) : null;
+  res.set("Content-Type", "text/html");
+  if (newEmail) {
+    res.send(`<html><body style="font-family:sans-serif; text-align:center; padding:60px;">
+      <h2>Email updated 🎉</h2>
+      <p>Your account email is now ${newEmail}. Please sign in again with your new email.</p>
+    </body></html>`);
+  } else {
+    res.status(400).send(`<html><body style="font-family:sans-serif; text-align:center; padding:60px;">
+      <h2>Link expired or invalid</h2>
+      <p>Request the email change again and try the new link.</p>
+    </body></html>`);
+  }
+});
+
+app.post("/api/auth/delete-account", requireAuth, async (req, res) => {
+  const { password } = req.body || {};
+  if (!password) return res.status(400).json({ error: "Password is required to delete your account." });
+  try {
+    await deleteAccount(req.email, password);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
 });
 
 /* ---------------------------------------------------------
